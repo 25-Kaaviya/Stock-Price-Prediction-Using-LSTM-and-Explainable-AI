@@ -1,0 +1,192 @@
+from google.colab import drive
+drive.mount('/content/drive')
+!pip install lime
+!pip install gradio
+!pip install tensorflow
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+import matplotlib.pyplot as plt
+from lime.lime_tabular import LimeTabularExplainer
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import mean_squared_error
+def get_company_data(ticker_symbol):
+    try:
+        # Create a Ticker object
+        ticker = yf.Ticker(ticker_symbol)
+
+        # Get company info
+        company_info = ticker.info
+        company_name = company_info.get('longName', 'N/A')
+        industry = company_info.get('industry', 'N/A')
+        sector = company_info.get('sector', 'N/A')
+
+        # Get historical market data
+        historical_data = ticker.history(period="1y")
+
+        return {
+            "company_name": company_name,
+            "industry": industry,
+            "sector": sector,
+            "historical_data": historical_data
+        }
+    except Exception as e:
+        return {"error": str(e)}
+def analyze_stock_with_lime(ticker_symbol):
+    # Get the stock information
+    ticker = yf.Ticker(ticker_symbol)
+
+    company_data = get_company_data(ticker_symbol)
+
+    # Get the historical data for the desired period (1 year in this case)
+    historical_data = ticker.history(period="10y")
+
+    # Store the historical data in a new DataFrame
+    df = pd.DataFrame(historical_data)
+
+    # Preprocess the data
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(df[['Close']])
+
+    # Split the data into training and test sets
+    train_data_len = int(len(scaled_data) * 0.8)
+    train_data = scaled_data[:train_data_len, :]
+    test_data = scaled_data[train_data_len - 100:, :]
+
+    # Create the training data
+    x_train = []
+    y_train = []
+    for i in range(100, len(train_data)):
+        x_train.append(train_data[i-100:i, 0])
+        y_train.append(train_data[i, 0])
+    x_train, y_train = np.array(x_train), np.array(y_train)
+    x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+
+    # Create the model
+    model = Sequential()
+    model.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1)))
+    model.add(LSTM(units=50, return_sequences=False))
+    model.add(Dense(units=25))
+    model.add(Dense(units=1))
+    model.compile(optimizer='adam', loss='mean_squared_error')
+
+
+    # Train the model
+    model.fit(x_train, y_train, batch_size=1, epochs=2)  # Increased epochs to 10 for better learning
+
+    # Save the model
+    model.save("/content/drive/My Drive/lstm_model.h5")
+
+    # Create the test data
+    x_test = []
+    y_test = df['Close'][train_data_len:].values
+    for i in range(100, len(test_data)):
+        x_test.append(test_data[i-100:i, 0])
+    x_test = np.array(x_test)
+    x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
+
+    # Generate the predictions
+    predictions = model.predict(x_test)
+    predictions = scaler.inverse_transform(predictions)
+
+    # Plot the actual vs predicted values
+    plt.figure(figsize=(12, 5))
+    plt.plot(df.index[train_data_len: train_data_len + len(predictions)], df['Close'][train_data_len:], label='Actual Close Prices')  # Actual close prices
+    plt.plot(df.index[train_data_len: train_data_len + len(predictions)], predictions.flatten(), label='Predicted Close Prices')  # Reshape predictions to 1D array
+    plt.xlabel('Time')
+    plt.ylabel('Price')
+    plt.title(f'Actual vs Predicted Close Prices for {ticker_symbol}')
+    plt.legend()
+    plt.savefig('plot1.png')
+
+    # Get the test data for future prediction
+    x_input = test_data[-100:]  # Use last 100 data points from test data
+    x_input = x_input.reshape((1, 100, 1))
+
+    # Run the future prediction
+    future_prediction = model.predict(x_input)
+
+    # Inverse transform the predicted value
+    future_prediction = scaler.inverse_transform(future_prediction)
+
+    # Print the future prediction
+    print("Future Prediction:", future_prediction.flatten()[0])
+
+    # Load the updated dataset for the given stock symbol
+    stock_data = yf.download(ticker_symbol)
+
+    # Preprocess the stock data if necessary
+    # For simplicity, assume the data is already preprocessed
+
+    # If 'Date' is not a column but an index, reset the index to make it a column
+    stock_data.reset_index(inplace=True)
+
+    # Split the stock data into features and target variable
+    X_stock = stock_data.drop(['Date', 'Open'], axis=1)  # Features
+    y_stock = stock_data['Close']  # Target variable
+
+    # Convert the target variable to categorical (if applicable)
+    # Assuming y_stock is categorical, if not, you can skip this step
+    y_stock = pd.cut(y_stock, bins=3, labels=['low', 'medium', 'high'])
+
+    # Split the stock data into training and testing sets
+    X_train_stock, X_test_stock, y_train_stock, y_test_stock = train_test_split(X_stock, y_stock, test_size=0.2, random_state=42)
+
+    # Train a machine learning model for the stock dataset
+    model_stock = RandomForestClassifier(n_estimators=100, random_state=42)
+    model_stock.fit(X_train_stock, y_train_stock)
+
+    # Initialize LIME Explainer for the stock dataset
+    explainer_stock = LimeTabularExplainer(X_train_stock.values,
+                                            feature_names=X_stock.columns.tolist(),
+                                            class_names=['low', 'medium', 'high'],
+                                            discretize_continuous=True)
+
+    # Select an instance from the stock test set for explanation
+    instance_idx_stock = 0
+    instance_stock = X_test_stock.iloc[instance_idx_stock].values.reshape(1, -1)
+
+    # Generate explanation for the stock instance
+    explanation_stock = explainer_stock.explain_instance(instance_stock[0], model_stock.predict_proba, num_features=len(X_stock.columns))
+
+    # Get the predicted value for the stock
+    predicted_value_stock = model_stock.predict(instance_stock)[0]
+
+    # Plot the feature importance for the stock
+    features_stock = explanation_stock.as_list()
+    feature_names_stock, feature_importance_stock = zip(*features_stock)
+
+    plt.figure(figsize=(10, 6))
+    plt.barh(feature_names_stock, feature_importance_stock, color='skyblue')
+    plt.xlabel('Feature Importance')
+    plt.ylabel('Feature')
+    plt.title(f'LIME Feature Importance for {ticker_symbol}')
+    plt.savefig('plot2.png')
+
+    # Display the predicted value for the stock
+    disp_values = f"""
+    Company Name: {company_data['company_name']}
+    Industry: {company_data['company_name']}
+    Sector: {company_data['sector']}
+
+    Predicted Value for {ticker_symbol} : {predicted_value_stock}
+    Future prediction: {future_prediction.flatten()[0]}
+
+    """
+
+    return disp_values, '/content/plot2.png'
+
+import gradio as gr
+
+# Define the input component
+input_component = gr.Textbox(label="Enter Stock Ticker Symbol")
+
+# Create the Gradio interface with a title
+gr.Interface(analyze_stock_with_lime,
+              inputs=input_component,
+              outputs=["text", "image"],
+              title="Stock Price prediction").launch()
